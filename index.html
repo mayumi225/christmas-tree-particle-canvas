@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#070108">
+<title>Christmas Tree · v17.6</title>
+<link rel="preconnect" href="https://fastly.jsdelivr.net" crossorigin>
+<link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Great+Vibes&family=Cormorant+Garamond:wght@300;400;500&display=swap">
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden;
+    background: #070108;
+    -webkit-tap-highlight-color: transparent;
+    font-family: "Cormorant Garamond", "PingFang SC", "Microsoft YaHei", serif;
+  }
+  #scene {
+    position: fixed; inset: 0; display: block;
+    width: 100%; height: 100%;
+    cursor: grab; touch-action: none;
+  }
+  #scene.dragging { cursor: grabbing; }
+
+  .ui {
+    position: fixed; top: max(16px, env(safe-area-inset-top)); right: 16px;
+    display: flex; gap: 8px; z-index: 5;
+  }
+  .ui button {
+    appearance: none; border: 1px solid rgba(255,255,255,0.16);
+    background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.72);
+    font: 500 12px/1 "Cormorant Garamond", "PingFang SC", sans-serif;
+    letter-spacing: 0.12em;
+    padding: 9px 15px; border-radius: 999px;
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    cursor: pointer; transition: color .35s ease, background .35s ease,
+      border-color .35s ease, box-shadow .35s ease, transform .2s ease;
+  }
+  .ui button:hover { color: #fff; transform: translateY(-1px); }
+  .ui button.on {
+    color: #fff;
+    background: rgba(255,255,255,0.16);
+    box-shadow: 0 0 22px -4px var(--accent, #ff58a8);
+    border-color: var(--accent, #ff58a8);
+  }
+
+  .hint {
+    position: fixed; left: 0; right: 0; bottom: max(16px, env(safe-area-inset-bottom));
+    text-align: center; z-index: 4; pointer-events: none;
+    font-size: 11px; letter-spacing: 0.26em; text-transform: uppercase;
+    color: rgba(255,255,255,0.34);
+    transition: opacity 1.6s ease;
+  }
+  .hint.off { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="scene" aria-label="Christmas tree light sculpture"></canvas>
+
+<div class="ui" id="ui"></div>
+<div class="hint" id="hint">Drag to rotate · Tap to bloom</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('scene');
+  var ctx = canvas.getContext('2d', { alpha: false });
+  var TAU = Math.PI * 2;
+
+  var W = 0, H = 0, DPR = 1, focal = 1;
+  var CAM_D = 34, CAM_Y = -1.0;
+  var TREE_BASE = -9.4, TREE_TOP = 6.6;
+
+  /* ---------------- themes ---------------- */
+
+  var THEMES = [
+    {
+      id: 'noir', label: '绯夜',
+      pal: [[255, 92, 168], [255, 170, 208], [255, 246, 252], [255, 36, 118], [212, 118, 224], [255, 138, 186]],
+      bg: ['#2b0f26', '#160617', '#070108'],
+      glow: 'rgba(255,92,175,',
+      ink: ['#fff2f9', '#ffa3cd', '#ff4fa3', '#a3136a'],
+      accent: '#ff58a8'
+    },
+    {
+      id: 'ice', label: '冰蓝',
+      pal: [[132, 208, 255], [200, 240, 255], [255, 255, 255], [64, 154, 255], [148, 180, 255], [116, 244, 238]],
+      bg: ['#0c2442', '#06122a', '#02060f'],
+      glow: 'rgba(110,182,255,',
+      ink: ['#f3fbff', '#a9dcff', '#4fa8ff', '#10558f'],
+      accent: '#6bc2ff'
+    },
+    {
+      id: 'gold', label: '鎏金',
+      pal: [[255, 210, 136], [255, 240, 192], [255, 252, 238], [255, 164, 56], [255, 116, 68], [230, 180, 92]],
+      bg: ['#2b1c08', '#150d04', '#070301'],
+      glow: 'rgba(255,190,112,',
+      ink: ['#fff9e8', '#ffdf9e', '#ffab3d', '#8a4a0e'],
+      accent: '#ffc46b'
+    },
+    {
+      id: 'aurora', label: '极光',
+      pal: [[104, 255, 212], [154, 224, 255], [240, 255, 250], [116, 176, 255], [190, 142, 255], [94, 242, 192]],
+      bg: ['#04211f', '#03131b', '#01070a'],
+      glow: 'rgba(104,240,212,',
+      ink: ['#effffb', '#a8ffdf', '#4fe0b6', '#0c6a54'],
+      accent: '#5cf0c8'
+    }
+  ];
+
+  var cur = THEMES[0];
+
+  /* ---------------- scene data ---------------- */
+
+  var treePts = [], dust = [], snow = [], stars = [], bursts = [], meteors = [];
+  var sprites = [], whiteSprite = null;
+
+  var angle = 0, angVel = 0;
+  var dragging = false, lastX = 0, dragMoved = 0;
+  var pointer = { x: -9999, y: -9999, on: false };
+  var t0 = 0;
+
+  function rand(a, b) {
+    if (b === undefined) { b = a; a = 0; }
+    return a + Math.random() * (b - a);
+  }
+
+  /* ---------------- sprites ---------------- */
+
+  function makeSprite(rgb, s) {
+    s = s || 64;
+    var cv = document.createElement('canvas');
+    cv.width = cv.height = s;
+    var g = cv.getContext('2d');
+    var r = s / 2;
+    var grad = g.createRadialGradient(r, r, 0, r, r, r);
+    grad.addColorStop(0, 'rgba(255,255,255,0.96)');
+    grad.addColorStop(0.10, 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',0.98)');
+    grad.addColorStop(0.32, 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',0.36)');
+    grad.addColorStop(0.66, 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',0.10)');
+    grad.addColorStop(1, 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, s, s);
+    return cv;
+  }
+
+  function buildSprites() {
+    sprites = [];
+    for (var i = 0; i < cur.pal.length; i++) sprites.push(makeSprite(cur.pal[i], 64));
+    whiteSprite = makeSprite([255, 255, 255], 48);
+  }
+
+  /* ---------------- projection ---------------- */
+
+  function project(x, y, z, ang) {
+    var ca = Math.cos(ang), sa = Math.sin(ang);
+    var xr = x * ca - z * sa;
+    var zr = x * sa + z * ca;
+    var scale = focal / (CAM_D - zr);
+    return {
+      x: W / 2 + xr * scale,
+      y: H / 2 - (y - CAM_Y) * scale,
+      scale: scale,
+      z: zr
+    };
+  }
+
+  function edgeStart() {
+    var e = Math.random();
+    if (e < 0.25) return [rand(-W * 0.1, W * 1.1), -H * 0.08];
+    if (e < 0.5) return [rand(-W * 0.1, W * 1.1), H * 1.08];
+    if (e < 0.75) return [-W * 0.08, rand(-H * 0.1, H * 1.1)];
+    return [W * 1.08, rand(-H * 0.1, H * 1.1)];
+  }
+
+  /* ---------------- build ---------------- */
+
+  function buildScene() {
+    var area = W * H;
+    var total = area < 700000 ? 3400 : (area < 1400000 ? 5400 : 7200);
+    var strands = 3, turns = 24;
+    var per = total / strands;
+
+    treePts = [];
+    for (var i = 0; i < total; i++) {
+      var st = i % strands;
+      var t = Math.floor(i / strands) / per;
+      var radius = 6.5 * Math.pow(1 - t, 0.86) + 0.3;
+      var ang = t * turns * TAU + st * (TAU / strands);
+      var jit = 0.16;
+      var ep = edgeStart();
+      var ornament = Math.random() < 0.030;
+      var y = TREE_BASE + t * (TREE_TOP - TREE_BASE);
+
+      treePts.push({
+        x: Math.cos(ang) * radius + rand(-jit, jit),
+        y: y + rand(-jit * 0.5, jit * 0.5),
+        z: Math.sin(ang) * radius + rand(-jit, jit),
+        t: t,
+        st: st,
+        c: Math.floor(Math.random() * cur.pal.length),
+        size: ornament ? rand(0.9, 1.35) : rand(0.14, 0.29),
+        orn: ornament,
+        phase: rand(TAU),
+        fade: t > 0.93 ? 1 - (t - 0.93) / 0.07 * 0.55 : 1,
+        sx: ep[0],
+        sy: ep[1]
+      });
+    }
+
+    dust = [];
+    var dCount = area < 700000 ? 260 : 480;
+    for (var d = 0; d < dCount; d++) {
+      dust.push({
+        a0: rand(TAU),
+        r: rand(2.0, 7.8),
+        y: rand(TREE_BASE, TREE_TOP + 1),
+        spd: rand(0.18, 0.62) * (Math.random() < 0.5 ? -1 : 1),
+        bob: rand(0.3, 1.3),
+        ph: rand(TAU),
+        c: Math.floor(Math.random() * cur.pal.length),
+        size: rand(0.12, 0.34)
+      });
+    }
+
+    snow = [];
+    var sCount = area < 700000 ? 110 : (area < 1400000 ? 190 : 260);
+    for (var s = 0; s < sCount; s++) {
+      snow.push({
+        x: rand(W), y: rand(H),
+        r: rand(1.0, 3.4),
+        vy: rand(14, 46),
+        amp: rand(6, 26),
+        ph: rand(TAU),
+        a: rand(0.18, 0.72)
+      });
+    }
+
+    stars = [];
+    for (var k = 0; k < 230; k++) {
+      stars.push({
+        x: rand(W), y: rand(-H * 0.05, H * 0.92),
+        r: rand(0.4, 1.6),
+        ph: rand(TAU),
+        sp: rand(0.6, 2.2),
+        a: rand(0.08, 0.5)
+      });
+    }
+
+    meteors = [];
+    for (var m = 0; m < 3; m++) {
+      meteors.push({
+        off: rand(11),
+        dur: rand(1.0, 1.4),
+        x: rand(W * 0.15, W * 0.8),
+        y: rand(-H * 0.1, H * 0.22),
+        dx: rand(W * 0.18, W * 0.34),
+        dy: rand(H * 0.22, H * 0.4)
+      });
+    }
+
+    focal = Math.max(720, H * 1.32);
+  }
+
+  /* ---------------- resize ---------------- */
+
+  function resize() {
+    W = window.innerWidth;
+    H = window.innerHeight;
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildScene();
+  }
+
+  /* ---------------- background ---------------- */
+
+  function drawBackdrop(time) {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+
+    var g = ctx.createRadialGradient(W * 0.5, H * 0.44, 0, W * 0.5, H * 0.44, Math.max(W, H) * 0.8);
+    g.addColorStop(0, cur.bg[0]);
+    g.addColorStop(0.55, cur.bg[1]);
+    g.addColorStop(1, cur.bg[2]);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // aurora veils
+    ctx.globalCompositeOperation = 'lighter';
+    for (var k = 0; k < 3; k++) {
+      var ax = W * (0.5 + 0.14 * Math.sin(time * 0.18 + k * 1.9));
+      var ay = H * (0.1 + 0.055 * k) + Math.sin(time * 0.33 + k * 1.7) * H * 0.018;
+      var rx = W * 0.68;
+      ctx.save();
+      ctx.translate(ax, ay);
+      ctx.rotate(-0.18 + k * 0.09 + Math.sin(time * 0.14 + k) * 0.02);
+      ctx.scale(1, 0.4);
+      var ag = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+      ag.addColorStop(0, cur.glow + '0.085)');
+      ag.addColorStop(0.45, cur.glow + '0.035)');
+      ag.addColorStop(1, cur.glow + '0)');
+      ctx.fillStyle = ag;
+      ctx.fillRect(-rx, -rx, rx * 2, rx * 2);
+      ctx.restore();
+    }
+
+    // star field
+    for (var i = 0; i < stars.length; i++) {
+      var st = stars[i];
+      var tw = 0.45 + 0.55 * Math.sin(time * st.sp + st.ph);
+      ctx.globalAlpha = st.a * tw;
+      var size = st.r * 6;
+      ctx.drawImage(whiteSprite, st.x - size / 2, st.y - size / 2, size, size);
+    }
+
+    // meteors
+    for (var mm = 0; mm < meteors.length; mm++) {
+      var me = meteors[mm];
+      var ph = (time + me.off) % 11;
+      if (ph > me.dur) continue;
+      var kk = ph / me.dur;
+      var mx = me.x + me.dx * kk;
+      var my = me.y + me.dy * kk;
+      var lx = mx - me.dx * 0.035;
+      var ly = my - me.dy * 0.035;
+      var a = Math.sin(kk * Math.PI);
+      var lg = ctx.createLinearGradient(lx, ly, mx, my);
+      lg.addColorStop(0, cur.glow + '0)');
+      lg.addColorStop(1, cur.glow + (0.85 * a).toFixed(3) + ')');
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = lg;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.moveTo(lx, ly);
+      ctx.lineTo(mx, my);
+      ctx.stroke();
+      var hd = 14 * a;
+      ctx.globalAlpha = a * 0.9;
+      ctx.drawImage(whiteSprite, mx - hd / 2, my - hd / 2, hd, hd);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------------- ground ---------------- */
+
+  function drawGround(time) {
+    var gp = project(0, TREE_BASE, 0, 0);
+    var pulse = 1 + 0.10 * Math.sin(time * 1.5);
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.save();
+    ctx.translate(gp.x, gp.y);
+    ctx.scale(1, 0.16);
+    var R = focal * 0.42 * pulse;
+    var g = ctx.createRadialGradient(0, 0, 0, 0, 0, R);
+    g.addColorStop(0, cur.glow + '0.42)');
+    g.addColorStop(0.42, cur.glow + '0.13)');
+    g.addColorStop(1, cur.glow + '0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------------- tree ---------------- */
+
+  function drawTree(time, ang, intro, mirror) {
+    ctx.globalCompositeOperation = 'lighter';
+    var len = treePts.length;
+    var step = mirror ? 4 : 1;
+    var breathe = 1 + 0.038 * Math.sin(time * 0.8);
+    var heartbeat = 0.88 + 0.12 * Math.pow(Math.max(0, Math.sin(time * 1.7)), 6);
+
+    for (var i = 0; i < len; i += step) {
+      var p = treePts[i];
+
+      var wy = p.y;
+      if (mirror) wy = TREE_BASE - (wy - TREE_BASE) * 0.52;
+
+      var pj = project(p.x * breathe, wy, p.z * breathe, ang);
+      var px = pj.x, py = pj.y;
+
+      if (!mirror) {
+        px = W / 2 + (px - W / 2) * intro;
+        py = H / 2 + (py - H / 2) * intro;
+        px = p.sx + (px - p.sx) * intro;
+        py = p.sy + (py - p.sy) * intro;
+        var drift = (1 - intro) * 7;
+        px += Math.sin(time * 2.4 + p.phase) * drift;
+        py += Math.cos(time * 2.1 + p.phase) * drift;
+      }
+
+      var depth = (pj.z + 8) / 15;
+      depth = depth < 0 ? 0 : (depth > 1 ? 1 : depth);
+
+      var tw = 0.5 + 0.5 * Math.sin(time * 3.2 + p.phase);
+      var chase = Math.pow(Math.max(0, Math.sin(p.t * 9.5 - time * 2.3 + p.st * 2.1)), 8);
+      var glint = Math.pow(Math.max(0, Math.sin(time * 2.0 + p.phase * 2.3)), 16);
+
+      var glow = 0.30 + 0.28 * tw + 0.55 * chase + 0.55 * glint;
+      var size = p.size * pj.scale * (0.85 + 0.2 * tw + 0.45 * chase + 0.35 * glint);
+      if (size < 1) size = 1;
+      if (size > 46) size = 46;
+
+      if (mirror) {
+        ctx.globalAlpha = Math.min(0.5, glow * 0.16 * (0.4 + 0.6 * depth) * p.fade);
+        ctx.drawImage(sprites[p.c], px - size / 2, py - size / 2, size, size);
+      } else {
+        ctx.globalAlpha = Math.min(1, glow * (0.38 + 0.62 * depth) * p.fade * (0.25 + 0.75 * intro) * heartbeat);
+        ctx.drawImage(sprites[p.c], px - size / 2, py - size / 2, size, size);
+
+        if (p.orn && intro > 0.85) {
+          var halo = size * 3.1;
+          ctx.globalAlpha = 0.14 + 0.20 * tw;
+          ctx.drawImage(sprites[p.c], px - halo / 2, py - halo / 2, halo, halo);
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------------- orbiting dust ---------------- */
+
+  function drawDust(time, ang) {
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < dust.length; i++) {
+      var o = dust[i];
+      var a = o.a0 + time * o.spd;
+      var y = o.y + Math.sin(time * o.bob + o.ph) * 0.5;
+      var pj = project(Math.cos(a) * o.r, y, Math.sin(a) * o.r, ang);
+      var tw = 0.5 + 0.5 * Math.sin(time * 2.6 + o.ph);
+      var size = o.size * pj.scale * (0.8 + 0.6 * tw);
+      ctx.globalAlpha = (0.22 + 0.55 * tw) * 0.8;
+      ctx.drawImage(sprites[o.c], pj.x - size / 2, pj.y - size / 2, size, size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------------- snow ---------------- */
+
+  function drawSnow(dt) {
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = 0; i < snow.length; i++) {
+      var f = snow[i];
+      f.y += f.vy * dt;
+      f.x += Math.sin(f.ph + f.y * 0.006) * f.amp * dt;
+
+      if (pointer.on) {
+        var dx = f.x - pointer.x, dy = f.y - pointer.y;
+        var d2 = dx * dx + dy * dy;
+        if (d2 < 42000) {
+          var d = Math.sqrt(d2) || 1;
+          f.x += (dx / d) * 26 * dt;
+          f.y += (dy / d) * 26 * dt;
+        }
+      }
+
+      if (f.x < -20) f.x = W + 20;
+      if (f.x > W + 20) f.x = -20;
+      if (f.y > H + 20) { f.y = -20; f.x = rand(W); }
+
+      var size = f.r * 6;
+      ctx.globalAlpha = f.a;
+      ctx.drawImage(whiteSprite, f.x - size / 2, f.y - size / 2, size, size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------------- bursts ---------------- */
+
+  function addBurst(x, y) {
+    var n = 34;
+    for (var i = 0; i < n; i++) {
+      var a = rand(TAU), sp = rand(40, 230);
+      bursts.push({
+        x: x, y: y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp - rand(0, 60),
+        life: 0, max: rand(0.9, 1.8),
+        c: Math.floor(Math.random() * cur.pal.length),
+        size: rand(0.5, 1.5)
+      });
+    }
+  }
+
+  function drawBursts(dt) {
+    ctx.globalCompositeOperation = 'lighter';
+    for (var i = bursts.length - 1; i >= 0; i--) {
+      var b = bursts[i];
+      b.life += dt;
+      if (b.life >= b.max) { bursts.splice(i, 1); continue; }
+      b.vy += 42 * dt;
+      b.vx *= Math.pow(0.965, dt * 60);
+      b.vy *= Math.pow(0.982, dt * 60);
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+
+      var k = b.life / b.max;
+      var size = (1 - k) * 9 * b.size;
+      if (size < 0.5) continue;
+      ctx.globalAlpha = (1 - k) * 0.95;
+      ctx.drawImage(sprites[b.c], b.x - size / 2, b.y - size / 2, size, size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ---------------- top star ---------------- */
+
+  function drawStar(time, ang) {
+    var pj = project(0, TREE_TOP + 0.9, 0, ang);
+    var pulse = 1 + 0.11 * Math.sin(time * 2.8);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.translate(pj.x, pj.y);
+    ctx.scale(pulse, pulse);
+
+    var R = focal * 0.20;
+    var g = ctx.createRadialGradient(0, 0, 0, 0, 0, R);
+    g.addColorStop(0, 'rgba(255,252,255,1)');
+    g.addColorStop(0.10, cur.glow + '0.8)');
+    g.addColorStop(0.36, cur.glow + '0.24)');
+    g.addColorStop(1, cur.glow + '0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, TAU);
+    ctx.fill();
+
+    var ray = focal * 0.30;
+    for (var i = 0; i < 12; i++) {
+      ctx.save();
+      ctx.rotate(i * Math.PI / 6 + time * 0.42);
+      var len = ray * (i % 2 === 0 ? 1 : 0.55);
+      var lg = ctx.createLinearGradient(0, 0, len, 0);
+      lg.addColorStop(0, 'rgba(255,248,252,0.85)');
+      lg.addColorStop(0.35, cur.glow + '0.26)');
+      lg.addColorStop(1, cur.glow + '0)');
+      ctx.fillStyle = lg;
+      ctx.beginPath();
+      ctx.moveTo(0, -3.4);
+      ctx.lineTo(len, 0);
+      ctx.lineTo(0, 3.4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    ctx.rotate(-time * 0.26);
+    var sr = focal * 0.05;
+    ctx.beginPath();
+    for (var k = 0; k < 10; k++) {
+      var rr = k % 2 === 0 ? sr : sr * 0.40;
+      var aa = k * Math.PI / 5 - Math.PI / 2;
+      var xx = Math.cos(aa) * rr, yy = Math.sin(aa) * rr;
+      if (k === 0) ctx.moveTo(xx, yy); else ctx.lineTo(xx, yy);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255,253,255,1)';
+    ctx.shadowColor = cur.accent;
+    ctx.shadowBlur = 42;
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  /* ---------------- typography ---------------- */
+
+  function drawType(time) {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    var size = Math.max(30, Math.min(104, W * 0.078));
+    var y = H * 0.885;
+
+    // thin year line
+    var ys = size * 0.22;
+    ctx.font = '400 ' + ys + 'px "Cormorant Garamond", serif';
+    if ('letterSpacing' in ctx) ctx.letterSpacing = (ys * 0.62).toFixed(1) + 'px';
+    ctx.fillStyle = 'rgba(255,255,255,0.30)';
+    ctx.fillText('2 0 2 6', W / 2 + ys * 0.34, y - size * 0.78);
+    if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+
+    // greeting
+    ctx.font = '400 ' + size + 'px "Great Vibes","Brush Script MT","Segoe Script","Snell Roundhand",cursive';
+    var shift = 0.5 + 0.5 * Math.sin(time * 0.8);
+    var g = ctx.createLinearGradient(0, y - size * 0.55, 0, y + size * 0.55);
+    g.addColorStop(0, cur.ink[0]);
+    g.addColorStop(0.30 + shift * 0.18, cur.ink[1]);
+    g.addColorStop(0.66, cur.ink[2]);
+    g.addColorStop(1, cur.ink[3]);
+    ctx.fillStyle = g;
+    ctx.shadowColor = cur.glow + '0.65)';
+    ctx.shadowBlur = 26 + 10 * Math.sin(time * 1.9);
+    ctx.fillText('Merry Christmas', W / 2, y);
+    ctx.shadowBlur = 0;
+  }
+
+  function drawVignette() {
+    ctx.globalCompositeOperation = 'source-over';
+    var v = ctx.createRadialGradient(W / 2, H * 0.5, Math.min(W, H) * 0.30, W / 2, H * 0.5, Math.max(W, H) * 0.78);
+    v.addColorStop(0, 'rgba(0,0,0,0)');
+    v.addColorStop(0.7, 'rgba(0,0,0,0.28)');
+    v.addColorStop(1, 'rgba(0,0,0,0.62)');
+    ctx.fillStyle = v;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  /* ---------------- loop ---------------- */
+
+  var last = 0;
+
+  function frame(now) {
+    if (!t0) t0 = now;
+    var time = (now - t0) / 1000;
+    var dt = last ? Math.min(0.05, time - last) : 0.016;
+    last = time;
+
+    var intro = Math.min(1, time / 2.7);
+    intro = 1 - Math.pow(1 - intro, 3);
+
+    if (!dragging) {
+      angle += (0.16 + angVel) * dt;
+      angVel *= Math.pow(0.86, dt * 60);
+      if (Math.abs(angVel) < 0.0004) angVel = 0;
+    }
+
+    drawBackdrop(time);
+    drawGround(time);
+    drawTree(time, angle, intro, true);
+    drawTree(time, angle, intro, false);
+    drawDust(time, angle);
+    drawSnow(dt);
+    drawBursts(dt);
+    drawStar(time, angle);
+    drawType(time);
+    drawVignette();
+
+    requestAnimationFrame(frame);
+  }
+
+  /* ---------------- interaction ---------------- */
+
+  var hint = document.getElementById('hint');
+  var hintTimer = setTimeout(function () { hint.classList.add('off'); }, 6500);
+
+  function pos(e) {
+    var r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  canvas.addEventListener('pointerdown', function (e) {
+    dragging = true;
+    lastX = e.clientX;
+    dragMoved = 0;
+    canvas.classList.add('dragging');
+    if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
+  });
+
+  canvas.addEventListener('pointermove', function (e) {
+    var p = pos(e);
+    pointer.x = p.x; pointer.y = p.y; pointer.on = true;
+
+    if (!dragging) return;
+    var dx = e.clientX - lastX;
+    lastX = e.clientX;
+    dragMoved += Math.abs(dx);
+    angle += dx * 0.0075;
+    angVel = dx * 0.10;
+  });
+
+  window.addEventListener('pointerup', function (e) {
+    if (!dragging) return;
+    dragging = false;
+    canvas.classList.remove('dragging');
+    if (dragMoved < 7) {
+      var p = pos(e);
+      if (p.y < H * 0.84) addBurst(p.x, p.y);
+    }
+  });
+
+  window.addEventListener('pointercancel', function () {
+    dragging = false;
+    canvas.classList.remove('dragging');
+  });
+
+  canvas.addEventListener('pointerleave', function () {
+    pointer.on = false;
+    pointer.x = -9999; pointer.y = -9999;
+  });
+
+  /* ---------------- theme ui ---------------- */
+
+  var ui = document.getElementById('ui');
+  var btns = [];
+
+  function applyTheme(idx) {
+    var prev = cur;
+    cur = THEMES[idx];
+    buildSprites();
+    canvas.style.background = cur.bg[2];
+    document.documentElement.style.setProperty('--accent', cur.accent);
+    document.body.style.background = cur.bg[2];
+    document.querySelector('meta[name="theme-color"]').setAttribute('content', cur.bg[2]);
+
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].classList.toggle('on', i === idx);
+      btns[i].style.setProperty('--accent', THEMES[i].accent);
+    }
+    if (prev !== cur) addBurst(W / 2, H * 0.42);
+  }
+
+  THEMES.forEach(function (t, i) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = t.label;
+    b.style.setProperty('--accent', t.accent);
+    b.addEventListener('click', function () { applyTheme(i); });
+    ui.appendChild(b);
+    btns.push(b);
+  });
+
+  /* ---------------- boot ---------------- */
+
+  window.addEventListener('resize', function () {
+    clearTimeout(resize._t);
+    resize._t = setTimeout(resize, 180);
+  });
+
+  buildSprites();
+  resize();
+  applyTheme(0);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
